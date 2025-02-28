@@ -1,0 +1,295 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import time
+import requests
+import math
+import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+
+# -------------------------------
+# 1. Data Preparation
+# -------------------------------
+def download_data():
+    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    response = requests.get(url)
+    return response.text
+
+class CharDataset(Dataset):
+    def __init__(self, sequences, targets):
+        self.sequences = sequences
+        self.targets = targets
+    def __len__(self):
+        return len(self.sequences)
+    def __getitem__(self, idx):
+        return self.sequences[idx], self.targets[idx]
+
+def prepare_dataset(text, sequence_length, char_to_int):
+    encoded_text = [char_to_int[ch] for ch in text]
+    sequences = []
+    targets = []
+    for i in range(len(encoded_text) - sequence_length):
+        seq = encoded_text[i : i + sequence_length]
+        target = encoded_text[i + sequence_length]
+        sequences.append(seq)
+        targets.append(target)
+    sequences = torch.tensor(sequences, dtype=torch.long)
+    targets = torch.tensor(targets, dtype=torch.long)
+    return sequences, targets
+
+# -------------------------------
+# 2. Model Definitions
+#    with optional fully connected layers
+# -------------------------------
+class LSTMModelFC(nn.Module):
+    def __init__(self, vocab_size, hidden_size, num_layers=1, fc_layers=None):
+        """
+        fc_layers: list of hidden sizes for additional fully connected layers.
+        """
+        super(LSTMModelFC, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
+
+        # Build optional fully connected network
+        layers = []
+        input_dim = hidden_size
+        if fc_layers is not None:
+            for fc_hidden in fc_layers:
+                layers.append(nn.Linear(input_dim, fc_hidden))
+                layers.append(nn.ReLU())
+                input_dim = fc_hidden
+        layers.append(nn.Linear(input_dim, vocab_size))
+        self.fc = nn.Sequential(*layers)
+    
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.lstm(x, hidden)
+        out = out[:, -1, :]  # last time-step
+        out = self.fc(out)
+        return out, hidden
+
+class GRUModelFC(nn.Module):
+    def __init__(self, vocab_size, hidden_size, num_layers=1, fc_layers=None):
+        super(GRUModelFC, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.gru = nn.GRU(hidden_size, hidden_size, num_layers, batch_first=True)
+
+        # Build optional fully connected network
+        layers = []
+        input_dim = hidden_size
+        if fc_layers is not None:
+            for fc_hidden in fc_layers:
+                layers.append(nn.Linear(input_dim, fc_hidden))
+                layers.append(nn.ReLU())
+                input_dim = fc_hidden
+        layers.append(nn.Linear(input_dim, vocab_size))
+        self.fc = nn.Sequential(*layers)
+    
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.gru(x, hidden)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out, hidden
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# -------------------------------
+# 3. Training Function
+# -------------------------------
+def train_model(model, train_loader, test_loader, epochs=10, lr=0.001, device="cpu"):
+    """
+    Returns:
+      - train_losses
+      - val_accuracies
+      - epoch_times
+      - total_time
+      - final_perplexity (based on final training loss)
+    """
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    train_losses = []
+    val_accuracies = []
+    epoch_times = []
+    total_start = time.time()
+
+    for epoch in range(epochs):
+        epoch_start = time.time()
+        model.train()
+        running_loss = 0.0
+        for batch_inputs, batch_targets in train_loader:
+            batch_inputs = batch_inputs.to(device)
+            batch_targets = batch_targets.to(device)
+            optimizer.zero_grad()
+            outputs, _ = model(batch_inputs)
+            loss = criterion(outputs, batch_targets)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * batch_inputs.size(0)
+        epoch_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(epoch_loss)
+
+        # Validation
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for batch_inputs, batch_targets in test_loader:
+                batch_inputs = batch_inputs.to(device)
+                batch_targets = batch_targets.to(device)
+                outputs, _ = model(batch_inputs)
+                _, predicted = torch.max(outputs, dim=1)
+                total += batch_targets.size(0)
+                correct += (predicted == batch_targets).sum().item()
+        accuracy = correct / total
+        val_accuracies.append(accuracy)
+
+        epoch_time = time.time() - epoch_start
+        epoch_times.append(epoch_time)
+
+        print(
+            f"Epoch {epoch+1}/{epochs} | "
+            f"Train Loss: {epoch_loss:.4f} | "
+            f"Val Acc: {accuracy:.4f} | "
+            f"Epoch Time: {epoch_time:.2f}s"
+        )
+
+    total_time = time.time() - total_start
+    final_perplexity = math.exp(train_losses[-1])  # perplexity = e^(loss)
+    print(f"Total Training Time: {total_time:.2f}s | Final Perplexity: {final_perplexity:.2f}\n")
+    return train_losses, val_accuracies, epoch_times, total_time, final_perplexity
+
+# -------------------------------
+# 4. Text Generation (Inference)
+# -------------------------------
+def generate_text(model, start_str, char_to_int, int_to_char, length=100, device="cpu"):
+    """
+    Generates text using the trained model, starting from 'start_str'.
+    """
+    model.eval()
+    input_seq = [char_to_int[ch] for ch in start_str]
+    input_seq = torch.tensor([input_seq], dtype=torch.long).to(device)
+    
+    generated = start_str
+    hidden = None
+    for _ in range(length):
+        with torch.no_grad():
+            output, hidden = model(input_seq, hidden)
+            # output shape: (batch_size=1, vocab_size)
+            _, predicted_idx = torch.max(output, dim=1)
+            predicted_char = int_to_char[predicted_idx.item()]
+            generated += predicted_char
+            # Next input
+            next_input = torch.tensor([[predicted_idx.item()]], dtype=torch.long).to(device)
+            input_seq = torch.cat([input_seq, next_input], dim=1)
+            input_seq = input_seq[:, 1:]  # keep sequence length constant (if needed)
+    return generated
+
+# -------------------------------
+# 5. Main Execution
+# -------------------------------
+if __name__ == "__main__":
+    # Adjust this to "cuda:1" or "cuda:2" as needed
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    # Download and prepare text
+    text_data = download_data()
+    chars = sorted(list(set(text_data)))
+    char_to_int = {ch: i for i, ch in enumerate(chars)}
+    int_to_char = {i: ch for i, ch in enumerate(chars)}
+    vocab_size = len(chars)
+
+    # Hyperparameter configurations to compare
+    # (hidden_size, num_layers, fc_layers)
+    hyperparam_configs = [
+        (128, 1, None),
+        (128, 2, None),
+        (256, 1, None),
+        (256, 2, [128]),
+        (256, 2, [256, 128])
+    ]
+
+    # We'll fix the sequence length and number of epochs for demonstration
+    sequence_length = 20  # you can also test 30 or vary it
+    epochs = 50
+    batch_size = 64
+
+    # Prepare the dataset
+    sequences, targets = prepare_dataset(text_data, sequence_length, char_to_int)
+    dataset = CharDataset(sequences, targets)
+
+    # Train/Test split
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Compare LSTM and GRU
+    model_types = ["LSTM", "GRU"]
+
+    results = {}
+    for mtype in model_types:
+        for (hidden_size, num_layers, fc_layers) in hyperparam_configs:
+            # Create a label for logging
+            label = f"{mtype}_HS{hidden_size}_NL{num_layers}_FC{fc_layers}"
+            print(f"--- Model: {label} ---")
+
+            # Instantiate model
+            if mtype == "LSTM":
+                model = LSTMModelFC(vocab_size, hidden_size, num_layers, fc_layers)
+            else:
+                model = GRUModelFC(vocab_size, hidden_size, num_layers, fc_layers)
+            
+            param_count = count_parameters(model)
+            print(f"Parameter Count: {param_count}")
+
+            # Train
+            train_losses, val_accs, epoch_times, total_time, perplexity = train_model(
+                model, train_loader, test_loader,
+                epochs=epochs, lr=0.001, device=device
+            )
+
+            # Generate sample text
+            sample_str = generate_text(model, "ROMEO:", char_to_int, int_to_char, length=100, device=device)
+            print("Sample Generated Text:")
+            print(sample_str)
+            print("------------------------------------------------------------\n")
+
+            results[label] = {
+                "train_losses": train_losses,
+                "val_accs": val_accs,
+                "epoch_times": epoch_times,
+                "total_time": total_time,
+                "param_count": param_count,
+                "perplexity": perplexity
+            }
+            torch.cuda.empty_cache()
+
+    # -------------------------
+    # Plot results (Loss/Accuracy) for each configuration
+    # -------------------------
+    for label, info in results.items():
+        plt.figure(figsize=(10, 4))
+        
+        # Plot Training Loss
+        plt.subplot(1, 2, 1)
+        plt.plot(info["train_losses"], label=label)
+        plt.title("Training Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+
+        # Plot Validation Accuracy
+        plt.subplot(1, 2, 2)
+        plt.plot(info["val_accs"], label=label)
+        plt.title("Validation Accuracy")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+
+        plt.suptitle(f"Results for {label}")
+        plt.tight_layout()
+        plt.show()

@@ -1,0 +1,284 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import time
+import requests
+import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+device = "cuda:1" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}\n")
+
+# -------------------------------------------------------
+# 1. Data Preparation
+# -------------------------------------------------------
+# Download the dataset
+url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+response = requests.get(url)
+text = response.text
+
+# Create character mappings
+chars = sorted(list(set(text)))
+char_to_int = {ch: i for i, ch in enumerate(chars)}
+int_to_char = {i: ch for i, ch in enumerate(chars)}
+vocab_size = len(chars)
+
+def prepare_dataset(text, sequence_length):
+    """Convert text into sequences and targets for the given sequence length."""
+    encoded_text = [char_to_int[ch] for ch in text]
+    sequences = []
+    targets = []
+    for i in range(len(encoded_text) - sequence_length):
+        seq = encoded_text[i : i + sequence_length]
+        target = encoded_text[i + sequence_length]
+        sequences.append(seq)
+        targets.append(target)
+    sequences = torch.tensor(sequences, dtype=torch.long)
+    targets = torch.tensor(targets, dtype=torch.long)
+    return sequences, targets
+
+class CharDataset(Dataset):
+    def __init__(self, sequences, targets):
+        self.sequences = sequences
+        self.targets = targets
+
+    def __len__(self):
+        return len(self.sequences)
+
+    def __getitem__(self, idx):
+        return self.sequences[idx], self.targets[idx]
+
+# -------------------------------------------------------
+# 2. Model Definitions
+# -------------------------------------------------------
+class LSTMModel(nn.Module):
+    def __init__(self, vocab_size, hidden_size, num_layers=1):
+        super(LSTMModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+    
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.lstm(x, hidden)
+        out = out[:, -1, :]  # Take the output from the last time step
+        out = self.fc(out)
+        return out, hidden
+
+class GRUModel(nn.Module):
+    def __init__(self, vocab_size, hidden_size, num_layers=1):
+        super(GRUModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.gru = nn.GRU(hidden_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+    
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.gru(x, hidden)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out, hidden
+
+def count_parameters(model):
+    """Return the number of trainable parameters in the model."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# -------------------------------------------------------
+# 3. Training Function
+# -------------------------------------------------------
+
+def train_model(model, train_loader, test_loader, epochs=50, lr=0.001, device=device):
+    """
+    Trains the given model and returns:
+        - train_losses: list of average training losses per epoch
+        - test_accuracies: list of validation accuracies per epoch
+        - epoch_times: list of times (in seconds) each epoch took
+        - total_time: total time (in seconds) for training
+    """
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    train_losses = []
+    test_accuracies = []
+    epoch_times = []
+    
+    total_start_time = time.time()
+
+    for epoch in range(epochs):
+        epoch_start = time.time()
+
+        # Training
+        model.train()
+        running_loss = 0.0
+        for batch_inputs, batch_targets in train_loader:
+            batch_inputs = batch_inputs.to(device)
+            batch_targets = batch_targets.to(device)
+
+            optimizer.zero_grad()
+            outputs, _ = model(batch_inputs)
+            loss = criterion(outputs, batch_targets)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item() * batch_inputs.size(0)
+
+        epoch_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(epoch_loss)
+
+        # Validation
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for batch_inputs, batch_targets in test_loader:
+                batch_inputs = batch_inputs.to(device)
+                batch_targets = batch_targets.to(device)
+                outputs, _ = model(batch_inputs)
+                _, predicted = torch.max(outputs, dim=1)
+                total += batch_targets.size(0)
+                correct += (predicted == batch_targets).sum().item()
+        accuracy = correct / total
+        test_accuracies.append(accuracy)
+
+        # Epoch time
+        epoch_time = time.time() - epoch_start
+        epoch_times.append(epoch_time)
+
+        print(
+            f"Epoch {epoch+1}/{epochs} | "
+            f"Loss: {epoch_loss:.4f} | "
+            f"Val Acc: {accuracy:.4f} | "
+            f"Epoch Time: {epoch_time:.2f} sec"
+        )
+
+    total_time = time.time() - total_start_time
+    print(f"Total Training Time: {total_time:.2f} seconds\n")
+
+    return train_losses, test_accuracies, epoch_times, total_time
+
+# -------------------------------------------------------
+# 4. Experiment Runner
+# -------------------------------------------------------
+device = "cuda:1" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}\n")
+def run_experiment(sequence_length, model_type, epochs=50, batch_size=64, hidden_size=128, num_layers=1, device=device):
+    """
+    Runs a single experiment for a given sequence length and model type (LSTM/GRU).
+    Returns a dictionary with training stats, including:
+      - train_losses
+      - test_accuracies
+      - epoch_times
+      - total_time
+      - parameters (model size)
+    """
+    print(f"--- Experiment: Seq Len = {sequence_length}, Model = {model_type}, Epochs = {epochs} ---")
+    # Prepare dataset
+    sequences, targets = prepare_dataset(text, sequence_length)
+    dataset = CharDataset(sequences, targets)
+
+    # Split into train/test
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Initialize model
+    if model_type == "LSTM":
+        model = LSTMModel(vocab_size, hidden_size, num_layers)
+    elif model_type == "GRU":
+        model = GRUModel(vocab_size, hidden_size, num_layers)
+    else:
+        raise ValueError("model_type must be 'LSTM' or 'GRU'")
+
+    # Print parameter count
+    params = count_parameters(model)
+    print(f"Parameter Count: {params}")
+
+    # Train
+    train_losses, test_accuracies, epoch_times, total_time = train_model(
+        model, train_loader, test_loader,
+        epochs=epochs, lr=0.001, device=device
+    )
+
+    # Clear GPU memory
+    torch.cuda.empty_cache()
+
+    return {
+        "train_losses": train_losses,
+        "test_accuracies": test_accuracies,
+        "epoch_times": epoch_times,
+        "total_time": total_time,
+        "parameters": params
+    }
+
+# -------------------------------------------------------
+# 5. Plotting Utility
+# -------------------------------------------------------
+def plot_metrics(results, sequence_lengths, models):
+    """
+    Plots training loss and validation accuracy curves for each sequence length and model.
+    'results' is a dictionary with keys like (model, seq_len) -> stats_dict.
+    """
+    for seq_len in sequence_lengths:
+        plt.figure(figsize=(12, 5))
+        
+        # Subplot 1: Training Loss
+        plt.subplot(1, 2, 1)
+        for m in models:
+            label = f"{m} (Seq={seq_len})"
+            plt.plot(results[(m, seq_len)]["train_losses"], label=label)
+        plt.title(f"Training Loss (Seq Len = {seq_len})")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend()
+
+        # Subplot 2: Validation Accuracy
+        plt.subplot(1, 2, 2)
+        for m in models:
+            label = f"{m} (Seq={seq_len})"
+            plt.plot(results[(m, seq_len)]["test_accuracies"], label=label)
+        plt.title(f"Validation Accuracy (Seq Len = {seq_len})")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+# -------------------------------------------------------
+# 6. Main Execution
+# -------------------------------------------------------
+if __name__ == "__main__":
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}\n")
+
+    sequence_lengths = [20, 30]
+    models = ["LSTM", "GRU"]
+    epochs = 50  # 50 epochs as requested
+
+    results = {}
+    for seq_len in sequence_lengths:
+        for m in models:
+            res = run_experiment(
+                sequence_length=seq_len,
+                model_type=m,
+                epochs=epochs,
+                batch_size=64,
+                hidden_size=128,
+                num_layers=1,
+                device=device
+            )
+            results[(m, seq_len)] = res
+
+    # Print a concise summary
+    for key, val in results.items():
+        mtype, slen = key
+        print(f"Summary for {mtype}, Seq Len={slen}:")
+        print(f" - Final Training Loss: {val['train_losses'][-1]:.4f}")
+        print(f" - Final Validation Accuracy: {val['test_accuracies'][-1]:.4f}")
+        print(f" - Total Training Time: {val['total_time']:.2f} sec")
+        print(f" - Parameter Count: {val['parameters']}\n")
+
+    # Plot metrics
+    plot_metrics(results, sequence_lengths, models)

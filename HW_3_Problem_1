@@ -1,0 +1,282 @@
+import time
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+
+# --------------------------------------------------------
+# 1. Text Data
+# --------------------------------------------------------
+text = (
+    "Next character prediction is a fundamental task in the field of natural language processing (NLP) that involves "
+    "predicting the next character in a sequence of text based on the characters that precede it. "
+    "This task is essential for various applications, including text auto-completion, spell checking, and even in the "
+    "development of sophisticated AI models capable of generating human-like text.\n\n"
+    "At its core, next character prediction relies on statistical models or deep learning algorithms to analyze a given "
+    "sequence of text and predict which character is most likely to follow. These predictions are based on patterns and "
+    "relationships learned from large datasets of text during the training phase of the model.\n\n"
+    "One of the most popular approaches to next character prediction involves the use of Recurrent Neural Networks (RNNs), "
+    "and more specifically, a variant called Long Short-Term Memory (LSTM) networks. RNNs are particularly well-suited for "
+    "sequential data like text, as they can maintain information in 'memory' about previous characters to inform the "
+    "prediction of the next character. LSTM networks enhance this capability by being able to remember long-term "
+    "dependencies, making them even more effective for next character prediction tasks.\n\n"
+    "Training a model for next character prediction involves feeding it large amounts of text data, allowing it to learn "
+    "the probability of each character's appearance following a sequence of characters. During this training process, the "
+    "model adjusts its parameters to minimize the difference between its predictions and the actual outcomes, thus "
+    "improving its predictive accuracy over time.\n\n"
+    "Once trained, the model can be used to predict the next character in a given piece of text by considering the sequence "
+    "of characters that precede it. This can enhance user experience in text editing software, improve efficiency in coding "
+    "environments with auto-completion features, and enable more natural interactions with AI-based chatbots and virtual "
+    "assistants.\n\n"
+    "In summary, next character prediction plays a crucial role in enhancing the capabilities of various NLP applications, "
+    "making text-based interactions more efficient, accurate, and human-like. Through the use of advanced machine learning "
+    "models like RNNs and LSTMs, next character prediction continues to evolve, opening new possibilities for the future "
+    "of text-based technology."
+)
+
+# Clean up text if needed (e.g., remove trailing spaces). This is optional.
+text = text.strip()
+
+# Create a character set and mappings
+chars = sorted(list(set(text)))
+char_to_idx = {ch: i for i, ch in enumerate(chars)}
+idx_to_char = {i: ch for i, ch in enumerate(chars)}
+vocab_size = len(chars)
+
+# --------------------------------------------------------
+# 2. Dataset Preparation
+# --------------------------------------------------------
+def create_sequences(text, seq_length):
+    """
+    Creates input-output pairs for next-character prediction.
+    Returns X (sequences), y (next chars).
+    """
+    encoded = [char_to_idx[ch] for ch in text]
+    X, y = [], []
+    for i in range(len(encoded) - seq_length):
+        X.append(encoded[i:i+seq_length])
+        y.append(encoded[i+seq_length])
+    return np.array(X), np.array(y)
+
+class CharDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = X
+        self.y = y
+    def __len__(self):
+        return len(self.X)
+    def __getitem__(self, idx):
+        return torch.tensor(self.X[idx], dtype=torch.long), torch.tensor(self.y[idx], dtype=torch.long)
+
+# --------------------------------------------------------
+# 3. Model Definitions
+# --------------------------------------------------------
+class BasicRNN(nn.Module):
+    """
+    A vanilla RNN for character-level prediction.
+    """
+    def __init__(self, vocab_size, embedding_dim=64, hidden_size=128, num_layers=1):
+        super(BasicRNN, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.rnn = nn.RNN(embedding_dim, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)              # (batch, seq_len, embedding_dim)
+        out, hidden = self.rnn(x, hidden)  # (batch, seq_len, hidden_size)
+        out = out[:, -1, :]                # take the last time-step
+        out = self.fc(out)                 # (batch, vocab_size)
+        return out, hidden
+
+class LSTMModel(nn.Module):
+    def __init__(self, vocab_size, embedding_dim=64, hidden_size=128, num_layers=1):
+        super(LSTMModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.lstm(x, hidden)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out, hidden
+
+class GRUModel(nn.Module):
+    def __init__(self, vocab_size, embedding_dim=64, hidden_size=128, num_layers=1):
+        super(GRUModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.gru = nn.GRU(embedding_dim, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.gru(x, hidden)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out, hidden
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# --------------------------------------------------------
+# 4. Training Function
+# --------------------------------------------------------
+def train_model(model, train_loader, val_loader, epochs=10, lr=0.001, device="cpu"):
+    """
+    Trains a model and returns:
+      - list of train losses per epoch
+      - list of validation accuracies per epoch
+      - total training time
+    """
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    train_losses = []
+    val_accuracies = []
+
+    start_time = time.time()
+
+    for epoch in range(epochs):
+        model.train()
+        running_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            X_batch = X_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            optimizer.zero_grad()
+            outputs, _ = model(X_batch)
+            loss = criterion(outputs, y_batch)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * X_batch.size(0)
+
+        epoch_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(epoch_loss)
+
+        # Validation
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for X_val, y_val in val_loader:
+                X_val = X_val.to(device)
+                y_val = y_val.to(device)
+                outputs, _ = model(X_val)
+                _, preds = torch.max(outputs, dim=1)
+                total += y_val.size(0)
+                correct += (preds == y_val).sum().item()
+        val_accuracy = correct / total
+        val_accuracies.append(val_accuracy)
+
+        print(f"Epoch [{epoch+1}/{epochs}] - Loss: {epoch_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+
+    total_time = time.time() - start_time
+    return train_losses, val_accuracies, total_time
+
+# --------------------------------------------------------
+# 5. Main Experiment
+# --------------------------------------------------------
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
+
+    # Hyperparameters
+    embedding_dim = 64
+    hidden_size = 128
+    num_layers = 1
+    epochs = 1000
+    batch_size = 32
+
+    # We'll test sequence lengths of 10, 20, 30
+    seq_lengths = [10, 20, 30]
+    # We'll compare BasicRNN, LSTMModel, GRUModel
+    model_types = {
+        "RNN": BasicRNN,
+        "LSTM": LSTMModel,
+        "GRU": GRUModel
+    }
+
+    results = {}
+    for seq_len in seq_lengths:
+        print(f"\n=== Sequence Length = {seq_len} ===")
+        # Prepare data
+        X, y = create_sequences(text, seq_len)
+        dataset = CharDataset(X, y)
+
+        # Split into train/validation
+        val_split = 0.2
+        val_size = int(len(dataset) * val_split)
+        train_size = len(dataset) - val_size
+        train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+        for model_name, model_class in model_types.items():
+            print(f"\n--- Model: {model_name} ---")
+            model = model_class(vocab_size, embedding_dim, hidden_size, num_layers)
+            param_count = count_parameters(model)
+            print(f"Parameter Count: {param_count}")
+
+            # Train
+            train_losses, val_accuracies, train_time = train_model(
+                model, train_loader, val_loader,
+                epochs=epochs, lr=0.001, device=device
+            )
+
+            # Store results
+            results_key = (model_name, seq_len)
+            results[results_key] = {
+                "train_losses": train_losses,
+                "val_accuracies": val_accuracies,
+                "train_time": train_time,
+                "param_count": param_count
+            }
+            print(f"Total Training Time: {train_time:.2f} seconds")
+
+    # --------------------------------------------------------
+    # 6. Print Summary and Plot
+    # --------------------------------------------------------
+    for (model_name, seq_len), info in results.items():
+        print(
+            f"Model: {model_name}, Seq Len: {seq_len} -> "
+            f"Final Loss: {info['train_losses'][-1]:.4f}, "
+            f"Final Val Acc: {info['val_accuracies'][-1]:.4f}, "
+            f"Train Time: {info['train_time']:.2f}s, "
+            f"Params: {info['param_count']}"
+        )
+
+    # Optional: Plot training loss and validation accuracy
+    # for each model and sequence length
+    # (You can remove or modify this part if you don't want plots.)
+    for seq_len in seq_lengths:
+        plt.figure(figsize=(12, 5))
+
+        # Subplot for Loss
+        plt.subplot(1, 2, 1)
+        for model_name in model_types:
+            if (model_name, seq_len) in results:
+                plt.plot(results[(model_name, seq_len)]["train_losses"],
+                         label=f"{model_name}")
+        plt.title(f"Training Loss (Seq={seq_len})")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend()
+
+        # Subplot for Accuracy
+        plt.subplot(1, 2, 2)
+        for model_name in model_types:
+            if (model_name, seq_len) in results:
+                plt.plot(results[(model_name, seq_len)]["val_accuracies"],
+                         label=f"{model_name}")
+        plt.title(f"Validation Accuracy (Seq={seq_len})")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.legend()
+
+        plt.suptitle(f"Sequence Length = {seq_len}")
+        plt.tight_layout()
+        plt.show()

@@ -1,0 +1,227 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import time
+import requests
+import math
+import matplotlib.pyplot as plt
+from torch.utils.data import Dataset, DataLoader
+
+# -------------------------------
+# 1. Data Preparation
+# -------------------------------
+def download_data():
+    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    response = requests.get(url)
+    return response.text
+
+class CharDataset(Dataset):
+    def __init__(self, sequences, targets):
+        self.sequences = sequences
+        self.targets = targets
+    def __len__(self):
+        return len(self.sequences)
+    def __getitem__(self, idx):
+        return self.sequences[idx], self.targets[idx]
+
+def prepare_dataset(text, sequence_length, char_to_int):
+    encoded_text = [char_to_int[ch] for ch in text]
+    sequences = []
+    targets = []
+    for i in range(len(encoded_text) - sequence_length):
+        seq = encoded_text[i : i + sequence_length]
+        target = encoded_text[i + sequence_length]
+        sequences.append(seq)
+        targets.append(target)
+    sequences = torch.tensor(sequences, dtype=torch.long)
+    targets = torch.tensor(targets, dtype=torch.long)
+    return sequences, targets
+
+# -------------------------------
+# 2. Simple LSTM and GRU Models
+# -------------------------------
+class LSTMModel(nn.Module):
+    def __init__(self, vocab_size, hidden_size=128, num_layers=1):
+        super(LSTMModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+    
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.lstm(x, hidden)
+        out = out[:, -1, :]  # last time step
+        out = self.fc(out)
+        return out, hidden
+
+class GRUModel(nn.Module):
+    def __init__(self, vocab_size, hidden_size=128, num_layers=1):
+        super(GRUModel, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+        self.gru = nn.GRU(hidden_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+    
+    def forward(self, x, hidden=None):
+        x = self.embedding(x)
+        out, hidden = self.gru(x, hidden)
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out, hidden
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+# -------------------------------
+# 3. Training Function
+# -------------------------------
+def train_model(model, train_loader, test_loader, epochs=20, lr=0.001, device="cpu"):
+    """
+    Returns:
+      - train_losses
+      - val_accuracies
+      - epoch_times
+      - total_time
+      - final_perplexity
+    """
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    train_losses = []
+    val_accuracies = []
+    epoch_times = []
+    total_start = time.time()
+
+    for epoch in range(epochs):
+        epoch_start = time.time()
+        model.train()
+        running_loss = 0.0
+        for batch_inputs, batch_targets in train_loader:
+            batch_inputs = batch_inputs.to(device)
+            batch_targets = batch_targets.to(device)
+            optimizer.zero_grad()
+            outputs, _ = model(batch_inputs)
+            loss = criterion(outputs, batch_targets)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item() * batch_inputs.size(0)
+        epoch_loss = running_loss / len(train_loader.dataset)
+        train_losses.append(epoch_loss)
+
+        # Validation
+        model.eval()
+        correct = 0
+        total = 0
+        with torch.no_grad():
+            for batch_inputs, batch_targets in test_loader:
+                batch_inputs = batch_inputs.to(device)
+                batch_targets = batch_targets.to(device)
+                outputs, _ = model(batch_inputs)
+                _, predicted = torch.max(outputs, dim=1)
+                total += batch_targets.size(0)
+                correct += (predicted == batch_targets).sum().item()
+        accuracy = correct / total
+        val_accuracies.append(accuracy)
+
+        epoch_time = time.time() - epoch_start
+        epoch_times.append(epoch_time)
+
+        print(
+            f"Epoch {epoch+1}/{epochs} | "
+            f"Loss: {epoch_loss:.4f} | "
+            f"Val Acc: {accuracy:.4f} | "
+            f"Epoch Time: {epoch_time:.2f}s"
+        )
+
+    total_time = time.time() - total_start
+    final_perplexity = math.exp(train_losses[-1])
+    print(f"Total Training Time: {total_time:.2f}s | Final Perplexity: {final_perplexity:.2f}\n")
+    return train_losses, val_accuracies, epoch_times, total_time, final_perplexity
+
+# -------------------------------
+# 4. Main Execution (Seq Len = 50)
+# -------------------------------
+if __name__ == "__main__":
+    # Adjust this to "cuda:1" or "cuda:2" as needed
+    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    text_data = download_data()
+    chars = sorted(list(set(text_data)))
+    char_to_int = {ch: i for i, ch in enumerate(chars)}
+    int_to_char = {i: ch for i, ch in enumerate(chars)}
+    vocab_size = len(chars)
+
+    sequence_length = 50  # As per Problem 3 requirement
+    epochs = 20
+    batch_size = 64
+
+    # Prepare dataset
+    sequences, targets = prepare_dataset(text_data, sequence_length, char_to_int)
+    dataset = CharDataset(sequences, targets)
+    train_size = int(0.8 * len(dataset))
+    test_size = len(dataset) - train_size
+    train_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, test_size])
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    # We'll train both LSTM and GRU with a baseline hidden size and layers
+    model_types = ["LSTM", "GRU"]
+
+    results = {}
+    for mtype in model_types:
+        if mtype == "LSTM":
+            model = LSTMModel(vocab_size, hidden_size=128, num_layers=1)
+        else:
+            model = GRUModel(vocab_size, hidden_size=128, num_layers=1)
+
+        print(f"--- Training {mtype} with Sequence Length = 50 ---")
+        param_count = count_parameters(model)
+        print(f"Parameter Count: {param_count}")
+
+        train_losses, val_accuracies, epoch_times, total_time, perplexity = train_model(
+            model, train_loader, test_loader, epochs=epochs, lr=0.001, device=device
+        )
+        results[mtype] = {
+            "train_losses": train_losses,
+            "val_accuracies": val_accuracies,
+            "epoch_times": epoch_times,
+            "total_time": total_time,
+            "param_count": param_count,
+            "perplexity": perplexity
+        }
+        torch.cuda.empty_cache()
+
+    # Plot the results
+    for mtype in model_types:
+        info = results[mtype]
+        plt.figure(figsize=(10, 4))
+
+        # Training Loss
+        plt.subplot(1, 2, 1)
+        plt.plot(info["train_losses"], label=f"{mtype} Loss")
+        plt.title("Training Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+
+        # Validation Accuracy
+        plt.subplot(1, 2, 2)
+        plt.plot(info["val_accuracies"], label=f"{mtype} Acc")
+        plt.title("Validation Accuracy")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+
+        plt.suptitle(f"Results for {mtype} (Seq Len=50)")
+        plt.tight_layout()
+        plt.show()
+
+    # Print a concise summary
+    for mtype in model_types:
+        info = results[mtype]
+        print(f"Summary for {mtype}:")
+        print(f" - Final Train Loss: {info['train_losses'][-1]:.4f}")
+        print(f" - Final Val Accuracy: {info['val_accuracies'][-1]:.4f}")
+        print(f" - Final Perplexity: {info['perplexity']:.2f}")
+        print(f" - Total Training Time: {info['total_time']:.2f}s")
+        print(f" - Parameter Count: {info['param_count']}")
+        print("------------------------------------------------------------\n")

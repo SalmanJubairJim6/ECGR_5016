@@ -1,0 +1,430 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+import random
+import numpy as np
+
+
+
+
+# ----------------------
+# 1. Data Preparation
+# ----------------------
+
+
+
+
+# Special tokens
+PAD_TOKEN = 0
+SOS_TOKEN = 1
+EOS_TOKEN = 2
+
+
+
+
+# Dataset (as defined earlier)
+english_to_french = [
+    ("I am cold", "J'ai froid"),
+    ("You are tired", "Tu es fatigué"),
+    ("He is hungry", "Il a faim"),
+    ("She is happy", "Elle est heureuse"),
+    ("We are friends", "Nous sommes amis"),
+    ("They are students", "Ils sont étudiants"),
+    ("The cat is sleeping", "Le chat dort"),
+    ("The sun is shining", "Le soleil brille"),
+    ("We love music", "Nous aimons la musique"),
+    ("She speaks French fluently", "Elle parle français couramment"),
+    # ... (include other pairs as needed)
+]
+
+
+
+
+# Tokenize sentences (word-level)
+def tokenize(sentence):
+    return sentence.strip().lower().split()
+
+
+
+
+# Build vocabulary for English (source) and French (target)
+def build_vocab(sentences):
+    vocab = {"<PAD>": PAD_TOKEN, "<SOS>": SOS_TOKEN, "<EOS>": EOS_TOKEN}
+    idx = 3  # starting index for real words
+    for sentence in sentences:
+        for word in tokenize(sentence):
+            if word not in vocab:
+                vocab[word] = idx
+                idx += 1
+    return vocab
+
+
+
+
+eng_sentences = [pair[0] for pair in english_to_french]
+fre_sentences = [pair[1] for pair in english_to_french]
+
+
+
+
+eng_vocab = build_vocab(eng_sentences)
+fre_vocab = build_vocab(fre_sentences)
+
+
+
+
+# Inverse dictionaries for decoding (for mapping back from index to word)
+inv_eng_vocab = {v: k for k, v in eng_vocab.items()}
+inv_fre_vocab = {v: k for k, v in fre_vocab.items()}
+
+
+
+
+# Convert sentences to list of token indices
+def sentence_to_indices(sentence, vocab):
+    tokens = [vocab[word] for word in tokenize(sentence)]
+    return [SOS_TOKEN] + tokens + [EOS_TOKEN]
+
+
+
+
+eng_data = [sentence_to_indices(s, eng_vocab) for s in eng_sentences]
+fre_data = [sentence_to_indices(s, fre_vocab) for s in fre_sentences]
+
+
+
+
+# Max lengths (for padding)
+max_len_eng = max(len(seq) for seq in eng_data)
+max_len_fre = max(len(seq) for seq in fre_data)
+
+
+
+
+# Custom Dataset
+class TranslationDataset(Dataset):
+    def __init__(self, src_data, tgt_data):
+        self.src_data = src_data
+        self.tgt_data = tgt_data
+
+
+
+
+    def __len__(self):
+        return len(self.src_data)
+
+
+
+
+    def __getitem__(self, idx):
+        return torch.tensor(self.src_data[idx], dtype=torch.long), torch.tensor(self.tgt_data[idx], dtype=torch.long)
+
+
+
+
+def collate_fn(batch):
+    src_batch, tgt_batch = zip(*batch)
+    src_batch = nn.utils.rnn.pad_sequence(src_batch, batch_first=True, padding_value=PAD_TOKEN)
+    tgt_batch = nn.utils.rnn.pad_sequence(tgt_batch, batch_first=True, padding_value=PAD_TOKEN)
+    return src_batch, tgt_batch
+
+
+
+
+# DataLoader
+data = list(zip(eng_data, fre_data))
+random.shuffle(data)
+split_idx = int(0.8 * len(data))
+train_data = data[:split_idx]
+val_data = data[split_idx:]
+train_dataset = TranslationDataset([x[0] for x in train_data], [x[1] for x in train_data])
+val_dataset = TranslationDataset([x[0] for x in val_data], [x[1] for x in val_data])
+batch_size = 4
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+
+
+# ----------------------
+# 2. Model Definitions with Attention
+# ----------------------
+
+
+
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, emb_dim, hid_dim):
+        super(Encoder, self).__init__()
+        self.embedding = nn.Embedding(input_dim, emb_dim, padding_idx=PAD_TOKEN)
+        self.gru = nn.GRU(emb_dim, hid_dim, batch_first=True)
+        
+    def forward(self, src):
+        embedded = self.embedding(src)  # [batch, src_len, emb_dim]
+        outputs, hidden = self.gru(embedded)  # outputs: [batch, src_len, hid_dim]
+        return outputs, hidden
+
+
+
+
+class Attention(nn.Module):
+    def __init__(self, hid_dim):
+        super(Attention, self).__init__()
+        self.hid_dim = hid_dim
+        
+    def forward(self, hidden, encoder_outputs):
+        # hidden: [1, batch, hid_dim]
+        # encoder_outputs: [batch, src_len, hid_dim]
+        hidden = hidden.transpose(0, 1)  # [batch, 1, hid_dim]
+        attn_scores = torch.bmm(hidden, encoder_outputs.transpose(1, 2))  # [batch, 1, src_len]
+        attn_weights = torch.softmax(attn_scores, dim=-1)  # [batch, 1, src_len]
+        context = torch.bmm(attn_weights, encoder_outputs)  # [batch, 1, hid_dim]
+        return context
+
+
+
+
+class DecoderWithAttention(nn.Module):
+    def __init__(self, output_dim, emb_dim, hid_dim):
+        super(DecoderWithAttention, self).__init__()
+        self.embedding = nn.Embedding(output_dim, emb_dim, padding_idx=PAD_TOKEN)
+        self.gru = nn.GRU(emb_dim + hid_dim, hid_dim, batch_first=True)
+        self.fc_out = nn.Linear(hid_dim * 2, output_dim)
+        self.attention = Attention(hid_dim)
+        
+    def forward(self, input, hidden, encoder_outputs):
+        input = input.unsqueeze(1)  # [batch, 1]
+        embedded = self.embedding(input)  # [batch, 1, emb_dim]
+        context = self.attention(hidden, encoder_outputs)  # [batch, 1, hid_dim]
+        gru_input = torch.cat((embedded, context), dim=2)  # [batch, 1, emb_dim+hid_dim]
+        output, hidden = self.gru(gru_input, hidden)  # output: [batch, 1, hid_dim]
+        output = output.squeeze(1)
+        context = context.squeeze(1)
+        prediction = self.fc_out(torch.cat((output, context), dim=1))  # [batch, output_dim]
+        return prediction, hidden
+
+
+
+
+class Seq2SeqAttention(nn.Module):
+    def __init__(self, encoder, decoder, device, teacher_forcing_ratio=0.5):
+        super(Seq2SeqAttention, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
+        self.teacher_forcing_ratio = teacher_forcing_ratio
+        
+    def forward(self, src, tgt):
+        batch_size = src.size(0)
+        tgt_len = tgt.size(1)
+        tgt_vocab_size = self.decoder.embedding.num_embeddings
+        
+        outputs = torch.zeros(batch_size, tgt_len, tgt_vocab_size).to(self.device)
+        encoder_outputs, hidden = self.encoder(src)
+        
+        input = tgt[:, 0]  # <SOS>
+        for t in range(1, tgt_len):
+            output, hidden = self.decoder(input, hidden, encoder_outputs)
+            outputs[:, t] = output
+            teacher_force = random.random() < self.teacher_forcing_ratio
+            top1 = output.argmax(1)
+            input = tgt[:, t] if teacher_force else top1
+        return outputs
+
+
+
+
+# ----------------------
+# Training Setup
+# ----------------------
+
+
+
+
+INPUT_DIM = len(eng_vocab)
+OUTPUT_DIM = len(fre_vocab)
+EMB_DIM = 256
+HID_DIM = 256
+
+
+
+
+enc = Encoder(INPUT_DIM, EMB_DIM, HID_DIM).to(device)
+dec = DecoderWithAttention(OUTPUT_DIM, EMB_DIM, HID_DIM).to(device)
+model_attn = Seq2SeqAttention(enc, dec, device, teacher_forcing_ratio=0.5).to(device)
+
+
+
+
+optimizer = optim.Adam(model_attn.parameters(), lr=0.001)
+criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
+
+
+
+
+def train_epoch_attn(model, loader, optimizer, criterion):
+    model.train()
+    epoch_loss = 0
+    epoch_correct = 0
+    total_sentences = 0
+    for src, tgt in loader:
+        src, tgt = src.to(device), tgt.to(device)
+        optimizer.zero_grad()
+        output = model(src, tgt)
+        output_dim = output.shape[-1]
+        output = output[:, 1:].reshape(-1, output_dim)
+        tgt_out = tgt[:, 1:].reshape(-1)
+        loss = criterion(output, tgt_out)
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+        
+        model.eval()
+        with torch.no_grad():
+            preds = output.argmax(1).view(tgt.size(0), -1)
+            targets = tgt[:, 1:]
+            for p, t in zip(preds, targets):
+                p_list = p.cpu().tolist()
+                t_list = t.cpu().tolist()
+                if EOS_TOKEN in p_list:
+                    p_list = p_list[:p_list.index(EOS_TOKEN)]
+                if EOS_TOKEN in t_list:
+                    t_list = t_list[:t_list.index(EOS_TOKEN)]
+                if p_list == t_list:
+                    epoch_correct += 1
+                total_sentences += 1
+        model.train()
+    return epoch_loss / len(loader), epoch_correct / total_sentences
+
+
+
+
+def evaluate_attn(model, loader, criterion):
+    model.eval()
+    epoch_loss = 0
+    epoch_correct = 0
+    total_sentences = 0
+    with torch.no_grad():
+        for src, tgt in loader:
+            src, tgt = src.to(device), tgt.to(device)
+            output = model(src, tgt)
+            output_dim = output.shape[-1]
+            output = output[:, 1:].reshape(-1, output_dim)
+            tgt_out = tgt[:, 1:].reshape(-1)
+            loss = criterion(output, tgt_out)
+            epoch_loss += loss.item()
+            
+            preds = output.argmax(1).view(tgt.size(0), -1)
+            targets = tgt[:, 1:]
+            for p, t in zip(preds, targets):
+                p_list = p.cpu().tolist()
+                t_list = t.cpu().tolist()
+                if EOS_TOKEN in p_list:
+                    p_list = p_list[:p_list.index(EOS_TOKEN)]
+                if EOS_TOKEN in t_list:
+                    t_list = t_list[:t_list.index(EOS_TOKEN)]
+                if p_list == t_list:
+                    epoch_correct += 1
+                total_sentences += 1
+    return epoch_loss / len(loader), epoch_correct / total_sentences
+
+
+
+
+num_epochs = 300
+train_losses_attn = []
+val_losses_attn = []
+train_acc_attn = []
+val_acc_attn = []
+
+
+
+
+for epoch in range(1, num_epochs + 1):
+    train_loss, train_accuracy = train_epoch_attn(model_attn, train_loader, optimizer, criterion)
+    val_loss, val_accuracy = evaluate_attn(model_attn, val_loader, criterion)
+    train_losses_attn.append(train_loss)
+    val_losses_attn.append(val_loss)
+    train_acc_attn.append(train_accuracy)
+    val_acc_attn.append(val_accuracy)
+    print(f'Epoch {epoch}: Train Loss={train_loss:.4f}, Train Acc={train_accuracy:.4f}, Val Loss={val_loss:.4f}, Val Acc={val_accuracy:.4f}')
+
+
+
+
+# Plot Losses
+plt.figure()
+plt.plot(train_losses_attn, label='Train Loss')
+plt.plot(val_losses_attn, label='Validation Loss')
+plt.title('Loss over Epochs (Problem 2 - Attention)')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+
+
+
+
+# Plot Accuracy
+plt.figure()
+plt.plot(train_acc_attn, label='Train Accuracy')
+plt.plot(val_acc_attn, label='Validation Accuracy')
+plt.title('Accuracy over Epochs (Problem 2 - Attention)')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show()
+
+
+
+
+# ----------------------
+# Qualitative Test: Generate French translations for English sentences
+# ----------------------
+
+
+
+
+def translate_sentence(model, sentence, src_vocab, tgt_vocab, max_len):
+    model.eval()
+    tokens = sentence_to_indices(sentence, src_vocab)
+    src_tensor = torch.tensor(tokens, dtype=torch.long).unsqueeze(0).to(device)
+    with torch.no_grad():
+        encoder_outputs, hidden = model.encoder(src_tensor)
+    outputs = [SOS_TOKEN]
+    input_token = torch.tensor([SOS_TOKEN], dtype=torch.long).to(device)
+    for _ in range(max_len):
+        with torch.no_grad():
+            output, hidden = model.decoder(input_token, hidden, encoder_outputs)
+        top1 = output.argmax(1).item()
+        if top1 == EOS_TOKEN:
+            break
+        outputs.append(top1)
+        input_token = torch.tensor([top1], dtype=torch.long).to(device)
+    words = [inv_fre_vocab.get(idx, "<UNK>") for idx in outputs[1:]]
+    return " ".join(words)
+
+
+
+
+# Test with English sentences
+test_examples = ["He is hungry", "She speaks French fluently", "We are friends"]
+for sent in test_examples:
+    translation = translate_sentence(model_attn, sent, eng_vocab, fre_vocab, max_len_fre)
+    print(f'Input: {sent}\nPredicted French: {translation}\n')
+
+
+
+
+
+
+
+
+
+
+
+
+

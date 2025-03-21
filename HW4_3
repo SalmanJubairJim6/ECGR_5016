@@ -1,0 +1,457 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import matplotlib.pyplot as plt
+import random
+import numpy as np
+
+
+# ----------------------
+# 1. Data Preparation (French to English)
+# ----------------------
+
+
+# Special tokens
+PAD_TOKEN = 0
+SOS_TOKEN = 1
+EOS_TOKEN = 2
+
+
+# Dataset (French as input, English as target)
+english_to_french = [
+ 
+    ("I am cold", "J'ai froid"),
+    ("You are tired", "Tu es fatigué"),
+    ("He is hungry", "Il a faim"),
+    ("She is happy", "Elle est heureuse"),
+    ("We are friends", "Nous sommes amis"),
+    ("They are students", "Ils sont étudiants"),
+    ("The cat is sleeping", "Le chat dort"),
+    ("The sun is shining", "Le soleil brille"),
+    ("We love music", "Nous aimons la musique"),
+    ("She speaks French fluently", "Elle parle français couramment"),
+    ("He enjoys reading books", "Il aime lire des livres"),
+    ("They play soccer every weekend", "Ils jouent au football chaque week-end"),
+    ("The movie starts at 7 PM", "Le film commence à 19 heures"),
+    ("She wears a red dress", "Elle porte une robe rouge"),
+    ("We cook dinner together", "Nous cuisinons le dîner ensemble"),
+    ("He drives a blue car", "Il conduit une voiture bleue"),
+    ("They visit museums often", "Ils visitent souvent des musées"),
+    ("The restaurant serves delicious food", "Le restaurant sert une délicieuse cuisine"),
+    ("She studies mathematics at university", "Elle étudie les mathématiques à l'université"),
+    ("We watch movies on Fridays", "Nous regardons des films le vendredi"),
+    ("He listens to music while jogging", "Il écoute de la musique en faisant du jogging"),
+    ("They travel around the world", "Ils voyagent autour du monde"),
+    ("The book is on the table", "Le livre est sur la table"),
+    ("She dances gracefully", "Elle danse avec grâce"),
+    ("We celebrate birthdays with cake", "Nous célébrons les anniversaires avec un gâteau"),
+    ("He works hard every day", "Il travaille dur tous les jours"),
+    ("They speak different languages", "Ils parlent différentes langues"),
+    ("The flowers bloom in spring", "Les fleurs fleurissent au printemps"),
+    ("She writes poetry in her free time", "Elle écrit de la poésie pendant son temps libre"),
+    ("We learn something new every day", "Nous apprenons quelque chose de nouveau chaque jour"),
+    ("The dog barks loudly", "Le chien aboie bruyamment"),
+    ("He sings beautifully", "Il chante magnifiquement"),
+    ("They swim in the pool", "Ils nagent dans la piscine"),
+    ("The birds chirp in the morning", "Les oiseaux gazouillent le matin"),
+    ("She teaches English at school", "Elle enseigne l'anglais à l'école"),
+    ("We eat breakfast together", "Nous prenons le petit déjeuner ensemble"),
+    ("He paints landscapes", "Il peint des paysages"),
+    ("They laugh at the joke", "Ils rient de la blague"),
+    ("The clock ticks loudly", "L'horloge tic-tac bruyamment"),
+    ("She runs in the park", "Elle court dans le parc"),
+    ("We travel by train", "Nous voyageons en train"),
+    ("He writes a letter", "Il écrit une lettre"),
+    ("They read books at the library", "Ils lisent des livres à la bibliothèque"),
+    ("The baby cries", "Le bébé pleure"),
+    ("She studies hard for exams", "Elle étudie dur pour les examens"),
+    ("We plant flowers in the garden", "Nous plantons des fleurs dans le jardin"),
+    ("He fixes the car", "Il répare la voiture"),
+    ("They drink coffee in the morning", "Ils boivent du café le matin"),
+    ("The sun sets in the evening", "Le soleil se couche le soir"),
+    ("She dances at the party", "Elle danse à la fête"),
+    ("We play music at the concert", "Nous jouons de la musique au concert"),
+    ("He cooks dinner for his family", "Il cuisine le dîner pour sa famille"),
+    ("They study French grammar", "Ils étudient la grammaire française"),
+    ("The rain falls gently", "La pluie tombe doucement"),
+    ("She sings a song", "Elle chante une chanson"),
+    ("We watch a movie together", "Nous regardons un film ensemble"),
+    ("He sleeps deeply", "Il dort profondément"),
+    ("They travel to Paris", "Ils voyagent à Paris"),
+    ("The children play in the park", "Les enfants jouent dans le parc"),
+    ("She walks along the beach", "Elle se promène le long de la plage"),
+    ("We talk on the phone", "Nous parlons au téléphone"),
+    ("He waits for the bus", "Il attend le bus"),
+    ("They visit the Eiffel Tower", "Ils visitent la tour Eiffel"),
+    ("The stars twinkle at night", "Les étoiles scintillent la nuit"),
+    ("She dreams of flying", "Elle rêve de voler"),
+    ("We work in the office", "Nous travaillons au bureau"),
+    ("He studies history", "Il étudie l'histoire"),
+    ("They listen to the radio", "Ils écoutent la radio"),
+    ("The wind blows gently", "Le vent souffle doucement"),
+    ("She swims in the ocean", "Elle nage dans l'océan"),
+    ("We dance at the wedding", "Nous dansons au mariage"),
+    ("He climbs the mountain", "Il gravit la montagne"),
+    ("They hike in the forest", "Ils font de la randonnée dans la forêt"),
+    ("The cat meows loudly", "Le chat miaule bruyamment"),
+    ("She paints a picture", "Elle peint un tableau"),
+    ("We build a sandcastle", "Nous construisons un château de sable"),
+    ("He sings in the choir", "Il chante dans le chœur"),
+    ("They ride bicycles", "Ils font du vélo"),
+    ("The coffee is hot", "Le café est chaud"),
+    ("She wears glasses", "Elle porte des lunettes"),
+    ("We visit our grandparents", "Nous rendons visite à nos grands-parents"),
+    ("He plays the guitar", "Il joue de la guitare"),
+    ("They go shopping", "Ils font du shopping"),
+    ("The teacher explains the lesson", "Le professeur explique la leçon"),
+    ("She takes the train to work", "Elle prend le train pour aller au travail"),
+    ("We bake cookies", "Nous faisons des biscuits"),
+    ("He washes his hands", "Il se lave les mains"),
+    ("They enjoy the sunset", "Ils apprécient le coucher du soleil"),
+    ("The river flows calmly", "La rivière coule calmement"),
+    ("She feeds the cat", "Elle nourrit le chat"),
+    ("We visit the museum", "Nous visitons le musée"),
+    ("He fixes his bicycle", "Il répare son vélo"),
+    ("They paint the walls", "Ils peignent les murs"),
+    ("The baby sleeps peacefully", "Le bébé dort paisiblement"),
+    ("She ties her shoelaces", "Elle attache ses lacets"),
+    ("We climb the stairs", "Nous montons les escaliers"),
+    ("He shaves in the morning", "Il se rase le matin"),
+    ("They set the table", "Ils mettent la table"),
+    ("The airplane takes off", "L'avion décolle"),
+    ("She waters the plants", "Elle arrose les plantes"),
+    ("We practice yoga", "Nous pratiquons le yoga"),
+    ("He turns off the light", "Il éteint la lumière"),
+    ("They play video games", "Ils jouent aux jeux vidéo"),
+    ("The soup smells delicious", "La soupe sent délicieusement bon"),
+    ("She locks the door", "Elle ferme la porte à clé"),
+    ("We enjoy a picnic", "Nous profitons d'un pique-nique"),
+    ("He checks his email", "Il vérifie ses emails"),
+    ("They go to the gym", "Ils vont à la salle de sport"),
+    ("The moon shines brightly", "La lune brille intensément"),
+    ("She catches the bus", "Elle attrape le bus"),
+    ("We greet our neighbors", "Nous saluons nos voisins"),
+    ("He combs his hair", "Il se peigne les cheveux"),
+    ("They wave goodbye", "Ils font un signe d'adieu")
+ 
+]
+
+
+
+# Tokenize sentences (word-level)
+def tokenize(sentence):
+    return sentence.strip().lower().split()
+
+
+# Build vocabulary for French (source) and English (target)
+def build_vocab(sentences):
+    vocab = {"<PAD>": PAD_TOKEN, "<SOS>": SOS_TOKEN, "<EOS>": EOS_TOKEN}
+    idx = 3  # starting index for real words
+    for sentence in sentences:
+        for word in tokenize(sentence):
+            if word not in vocab:
+                vocab[word] = idx
+                idx += 1
+    return vocab
+
+
+fre_sentences = [pair[1] for pair in english_to_french]  # French as input
+eng_sentences = [pair[0] for pair in english_to_french]  # English as target
+
+
+fre_vocab = build_vocab(fre_sentences)
+eng_vocab = build_vocab(eng_sentences)
+
+
+# Inverse dictionaries for decoding (for mapping back from index to word)
+inv_fre_vocab = {v: k for k, v in fre_vocab.items()}
+inv_eng_vocab = {v: k for k, v in eng_vocab.items()}
+
+
+# Convert sentences to list of token indices
+def sentence_to_indices(sentence, vocab):
+    tokens = [vocab[word] for word in tokenize(sentence)]
+    return [SOS_TOKEN] + tokens + [EOS_TOKEN]
+
+
+fre_data = [sentence_to_indices(s, fre_vocab) for s in fre_sentences]
+eng_data = [sentence_to_indices(s, eng_vocab) for s in eng_sentences]
+
+
+# Max lengths (for padding)
+max_len_fre = max(len(seq) for seq in fre_data)
+max_len_eng = max(len(seq) for seq in eng_data)
+
+
+# Custom Dataset
+class TranslationDataset(Dataset):
+    def __init__(self, src_data, tgt_data):
+        self.src_data = src_data
+        self.tgt_data = tgt_data
+
+
+    def __len__(self):
+        return len(self.src_data)
+
+
+    def __getitem__(self, idx):
+        return torch.tensor(self.src_data[idx], dtype=torch.long), torch.tensor(self.tgt_data[idx], dtype=torch.long)
+
+
+def collate_fn(batch):
+    src_batch, tgt_batch = zip(*batch)
+    src_batch = nn.utils.rnn.pad_sequence(src_batch, batch_first=True, padding_value=PAD_TOKEN)
+    tgt_batch = nn.utils.rnn.pad_sequence(tgt_batch, batch_first=True, padding_value=PAD_TOKEN)
+    return src_batch, tgt_batch
+
+
+# DataLoader
+data = list(zip(fre_data, eng_data))
+random.shuffle(data)
+split_idx = int(0.8 * len(data))
+train_data = data[:split_idx]
+val_data = data[split_idx:]
+train_dataset = TranslationDataset([x[0] for x in train_data], [x[1] for x in train_data])
+val_dataset = TranslationDataset([x[0] for x in val_data], [x[1] for x in val_data])
+batch_size = 4
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+# ----------------------
+# 2. Model Definitions with Attention
+# ----------------------
+
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, emb_dim, hid_dim):
+        super(Encoder, self).__init__()
+        self.embedding = nn.Embedding(input_dim, emb_dim, padding_idx=PAD_TOKEN)
+        self.gru = nn.GRU(emb_dim, hid_dim, batch_first=True)
+        
+    def forward(self, src):
+        embedded = self.embedding(src)  # [batch, src_len, emb_dim]
+        outputs, hidden = self.gru(embedded)  # outputs: [batch, src_len, hid_dim]
+        return outputs, hidden
+
+
+class Attention(nn.Module):
+    def __init__(self, hid_dim):
+        super(Attention, self).__init__()
+        self.hid_dim = hid_dim
+        
+    def forward(self, hidden, encoder_outputs):
+        hidden = hidden.transpose(0, 1)  # [batch, 1, hid_dim]
+        attn_scores = torch.bmm(hidden, encoder_outputs.transpose(1, 2))  # [batch, 1, src_len]
+        attn_weights = torch.softmax(attn_scores, dim=-1)  # [batch, 1, src_len]
+        context = torch.bmm(attn_weights, encoder_outputs)  # [batch, 1, hid_dim]
+        return context
+
+
+class DecoderWithAttention(nn.Module):
+    def __init__(self, output_dim, emb_dim, hid_dim):
+        super(DecoderWithAttention, self).__init__()
+        self.embedding = nn.Embedding(output_dim, emb_dim, padding_idx=PAD_TOKEN)
+        self.gru = nn.GRU(emb_dim + hid_dim, hid_dim, batch_first=True)
+        self.fc_out = nn.Linear(hid_dim * 2, output_dim)
+        self.attention = Attention(hid_dim)
+        
+    def forward(self, input, hidden, encoder_outputs):
+        input = input.unsqueeze(1)  # [batch, 1]
+        embedded = self.embedding(input)  # [batch, 1, emb_dim]
+        context = self.attention(hidden, encoder_outputs)  # [batch, 1, hid_dim]
+        gru_input = torch.cat((embedded, context), dim=2)  # [batch, 1, emb_dim+hid_dim]
+        output, hidden = self.gru(gru_input, hidden)  # output: [batch, 1, hid_dim]
+        output = output.squeeze(1)
+        context = context.squeeze(1)
+        prediction = self.fc_out(torch.cat((output, context), dim=1))  # [batch, output_dim]
+        return prediction, hidden
+
+
+class Seq2SeqAttention(nn.Module):
+    def __init__(self, encoder, decoder, device, teacher_forcing_ratio=0.5):
+        super(Seq2SeqAttention, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
+        self.teacher_forcing_ratio = teacher_forcing_ratio
+        
+    def forward(self, src, tgt):
+        batch_size = src.size(0)
+        tgt_len = tgt.size(1)
+        tgt_vocab_size = self.decoder.embedding.num_embeddings
+        
+        outputs = torch.zeros(batch_size, tgt_len, tgt_vocab_size).to(self.device)
+        encoder_outputs, hidden = self.encoder(src)
+        
+        input = tgt[:, 0]  # <SOS>
+        for t in range(1, tgt_len):
+            output, hidden = self.decoder(input, hidden, encoder_outputs)
+            outputs[:, t] = output
+            teacher_force = random.random() < self.teacher_forcing_ratio
+            top1 = output.argmax(1)
+            input = tgt[:, t] if teacher_force else top1
+        return outputs
+
+
+# ----------------------
+# Training Setup
+# ----------------------
+
+
+INPUT_DIM = len(fre_vocab)
+OUTPUT_DIM = len(eng_vocab)
+EMB_DIM = 256
+HID_DIM = 256
+
+
+enc = Encoder(INPUT_DIM, EMB_DIM, HID_DIM).to(device)
+dec = DecoderWithAttention(OUTPUT_DIM, EMB_DIM, HID_DIM).to(device)
+model_attn = Seq2SeqAttention(enc, dec, device, teacher_forcing_ratio=0.5).to(device)
+
+
+optimizer = optim.Adam(model_attn.parameters(), lr=0.001)
+criterion = nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
+
+
+def train_epoch_attn(model, loader, optimizer, criterion):
+    model.train()
+    epoch_loss = 0
+    epoch_correct = 0
+    total_sentences = 0
+    for src, tgt in loader:
+        src, tgt = src.to(device), tgt.to(device)
+        optimizer.zero_grad()
+        output = model(src, tgt)
+        output_dim = output.shape[-1]
+        output = output[:, 1:].reshape(-1, output_dim)
+        tgt_out = tgt[:, 1:].reshape(-1)
+        loss = criterion(output, tgt_out)
+        loss.backward()
+        optimizer.step()
+        epoch_loss += loss.item()
+        
+        model.eval()
+        with torch.no_grad():
+            preds = output.argmax(1).view(tgt.size(0), -1)
+            targets = tgt[:, 1:]
+            for p, t in zip(preds, targets):
+                p_list = p.cpu().tolist()
+                t_list = t.cpu().tolist()
+                if EOS_TOKEN in p_list:
+                    p_list = p_list[:p_list.index(EOS_TOKEN)]
+                if EOS_TOKEN in t_list:
+                    t_list = t_list[:t_list.index(EOS_TOKEN)]
+                if p_list == t_list:
+                    epoch_correct += 1
+                total_sentences += 1
+        model.train()
+    return epoch_loss / len(loader), epoch_correct / total_sentences
+
+
+def evaluate_attn(model, loader, criterion):
+    model.eval()
+    epoch_loss = 0
+    epoch_correct = 0
+    total_sentences = 0
+    with torch.no_grad():
+        for src, tgt in loader:
+            src, tgt = src.to(device), tgt.to(device)
+            output = model(src, tgt)
+            output_dim = output.shape[-1]
+            output = output[:, 1:].reshape(-1, output_dim)
+            tgt_out = tgt[:, 1:].reshape(-1)
+            loss = criterion(output, tgt_out)
+            epoch_loss += loss.item()
+            
+            preds = output.argmax(1).view(tgt.size(0), -1)
+            targets = tgt[:, 1:]
+            for p, t in zip(preds, targets):
+                p_list = p.cpu().tolist()
+                t_list = t.cpu().tolist()
+                if EOS_TOKEN in p_list:
+                    p_list = p_list[:p_list.index(EOS_TOKEN)]
+                if EOS_TOKEN in t_list:
+                    t_list = t_list[:t_list.index(EOS_TOKEN)]
+                if p_list == t_list:
+                    epoch_correct += 1
+                total_sentences += 1
+    return epoch_loss / len(loader), epoch_correct / total_sentences
+
+
+num_epochs = 300
+train_losses_attn = []
+val_losses_attn = []
+train_acc_attn = []
+val_acc_attn = []
+
+
+for epoch in range(1, num_epochs + 1):
+    train_loss, train_accuracy = train_epoch_attn(model_attn, train_loader, optimizer, criterion)
+    val_loss, val_accuracy = evaluate_attn(model_attn, val_loader, criterion)
+    train_losses_attn.append(train_loss)
+    val_losses_attn.append(val_loss)
+    train_acc_attn.append(train_accuracy)
+    val_acc_attn.append(val_accuracy)
+    print(f'Epoch {epoch}: Train Loss={train_loss:.4f}, Train Acc={train_accuracy:.4f}, Val Loss={val_loss:.4f}, Val Acc={val_accuracy:.4f}')
+
+
+# Plot Losses
+plt.figure()
+plt.plot(train_losses_attn, label='Train Loss')
+plt.plot(val_losses_attn, label='Validation Loss')
+plt.title('Loss over Epochs (Problem 3 - French to English)')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+
+
+# Plot Accuracy
+plt.figure()
+plt.plot(train_acc_attn, label='Train Accuracy')
+plt.plot(val_acc_attn, label='Validation Accuracy')
+plt.title('Accuracy over Epochs (Problem 3 - French to English)')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show()
+
+
+# ----------------------
+# Qualitative Test: Generate English translations for French sentences
+# ----------------------
+
+
+def translate_sentence(model, sentence, src_vocab, tgt_vocab, max_len):
+    model.eval()
+    tokens = sentence_to_indices(sentence, src_vocab)
+    src_tensor = torch.tensor(tokens, dtype=torch.long).unsqueeze(0).to(device)
+    with torch.no_grad():
+        encoder_outputs, hidden = model.encoder(src_tensor)
+    outputs = [SOS_TOKEN]
+    input_token = torch.tensor([SOS_TOKEN], dtype=torch.long).to(device)
+    for _ in range(max_len):
+        with torch.no_grad():
+            output, hidden = model.decoder(input_token, hidden, encoder_outputs)
+        top1 = output.argmax(1).item()
+        if top1 == EOS_TOKEN:
+            break
+        outputs.append(top1)
+        input_token = torch.tensor([top1], dtype=torch.long).to(device)
+    words = [inv_eng_vocab.get(idx, "<UNK>") for idx in outputs[1:]]
+    return " ".join(words)
+
+
+# Test with French sentences
+test_examples = ["Le chat dort", "Ils voyagent à Paris", "Les oiseaux gazouillent le matin"]
+for sent in test_examples:
+    translation = translate_sentence(model_attn, sent, fre_vocab, eng_vocab, max_len_eng)
+    print(f'Input: {sent}\nPredicted English: {translation}\n')
+
+
+
+
+
